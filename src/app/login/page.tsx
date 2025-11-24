@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useRef } from 'react';
-import { supabase } from '@/lib/supabase';
+import { useState, useRef, useEffect } from 'react';
+import { supabase, isSupabaseConfigured, checkSupabaseConnection } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import { Apple, Mail, Lock, User, Scale, Target } from 'lucide-react';
+import { Apple, Mail, Lock, User, Scale, Target, AlertCircle } from 'lucide-react';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -11,6 +11,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [connectionError, setConnectionError] = useState('');
   
   // Login state
   const [email, setEmail] = useState('');
@@ -28,9 +29,70 @@ export default function LoginPage() {
   // Prevent multiple simultaneous requests
   const isProcessing = useRef(false);
 
+  // Verificar conexão ao montar componente
+  useEffect(() => {
+    const verifyConnection = async () => {
+      if (!isSupabaseConfigured()) {
+        setConnectionError('⚠️ Supabase não configurado. Clique em "Configurar" no banner laranja acima para adicionar suas credenciais.');
+        return;
+      }
+
+      const { connected, error: connError } = await checkSupabaseConnection();
+      if (!connected) {
+        setConnectionError(`⚠️ Erro de conexão: ${connError || 'Não foi possível conectar ao Supabase'}`);
+      } else {
+        setConnectionError('');
+      }
+    };
+
+    verifyConnection();
+  }, []);
+
+  // Função para traduzir erros do Supabase
+  const translateError = (errorMessage: string): string => {
+    // Erros de rede
+    if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NETWORK_ERROR')) {
+      return '❌ Erro de conexão. Verifique se o Supabase está configurado corretamente no banner laranja acima.';
+    }
+    if (errorMessage.includes('NETWORK_TIMEOUT')) {
+      return '⏱️ Tempo de conexão esgotado. Tente novamente.';
+    }
+
+    const errorMap: { [key: string]: string } = {
+      'Invalid login credentials': 'Email ou senha incorretos',
+      'Email not confirmed': 'Email não confirmado',
+      'User already registered': 'Este email já está cadastrado',
+      'Password should be at least 6 characters': 'A senha deve ter pelo menos 6 caracteres',
+      'Unable to validate email address: invalid format': 'Formato de email inválido',
+      'Email rate limit exceeded': 'Muitas tentativas. Aguarde alguns minutos',
+      'Signup requires a valid password': 'É necessário fornecer uma senha válida',
+      'User not found': 'Usuário não encontrado',
+      'Invalid email or password': 'Email ou senha inválidos',
+      'Email link is invalid or has expired': 'Link de email inválido ou expirado',
+      'Token has expired or is invalid': 'Sessão expirada. Faça login novamente',
+      'New password should be different from the old password': 'A nova senha deve ser diferente da anterior',
+    };
+
+    // Procura por correspondências parciais
+    for (const [key, value] of Object.entries(errorMap)) {
+      if (errorMessage.toLowerCase().includes(key.toLowerCase())) {
+        return value;
+      }
+    }
+
+    // Se não encontrar correspondência, retorna mensagem genérica
+    return 'Ocorreu um erro. Tente novamente';
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Verificar configuração antes de tentar login
+    if (!isSupabaseConfigured()) {
+      setError('⚠️ Configure o Supabase primeiro. Clique em "Configurar" no banner laranja acima.');
+      return;
+    }
+
     // Prevent multiple simultaneous requests
     if (isProcessing.current || loading) {
       return;
@@ -49,11 +111,15 @@ export default function LoginPage() {
       if (error) throw error;
 
       if (data.user) {
-        router.push('/dashboard');
-        router.refresh();
+        setSuccess('Login realizado com sucesso! Redirecionando...');
+        setTimeout(() => {
+          router.push('/dashboard');
+        }, 1000);
       }
     } catch (err: any) {
-      setError(err.message || 'Erro ao fazer login');
+      console.error('Login error:', err);
+      const translatedError = translateError(err.message || 'Erro desconhecido');
+      setError(translatedError);
     } finally {
       setLoading(false);
       setTimeout(() => {
@@ -65,6 +131,12 @@ export default function LoginPage() {
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Verificar configuração antes de tentar signup
+    if (!isSupabaseConfigured()) {
+      setError('⚠️ Configure o Supabase primeiro. Clique em "Configurar" no banner laranja acima.');
+      return;
+    }
+
     // Prevent multiple simultaneous requests
     if (isProcessing.current || loading) {
       return;
@@ -76,15 +148,15 @@ export default function LoginPage() {
     setSuccess('');
 
     try {
-      // Create auth user
+      // Create auth user with autoConfirm option
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: signupData.email,
         password: signupData.password,
         options: {
-          emailRedirectTo: `${window.location.origin}/dashboard`,
           data: {
             name: signupData.name,
-          }
+          },
+          emailRedirectTo: undefined,
         }
       });
 
@@ -96,54 +168,95 @@ export default function LoginPage() {
         throw new Error('Erro ao criar usuário');
       }
 
-      // Create profile
-      const { error: profileError } = await supabase.from('profiles').insert({
-        user_id: authData.user.id,
-        name: signupData.name,
-        weight_current: parseFloat(signupData.weightCurrent),
-        weight_goal: parseFloat(signupData.weightGoal),
-        weight_initial: parseFloat(signupData.weightCurrent),
-      });
+      // Check if email confirmation is required
+      if (authData.session) {
+        // User is already logged in (email confirmation disabled)
+        // Create profile
+        const { error: profileError } = await supabase.from('profiles').insert({
+          user_id: authData.user.id,
+          name: signupData.name,
+          weight_current: parseFloat(signupData.weightCurrent),
+          weight_goal: parseFloat(signupData.weightGoal),
+          weight_initial: parseFloat(signupData.weightCurrent),
+        });
 
-      if (profileError) {
-        console.warn('Profile creation warning:', profileError);
-      }
+        if (profileError) {
+          console.warn('Profile creation warning:', profileError);
+        }
 
-      // Create initial daily stats
-      const { error: statsError } = await supabase.from('daily_stats').insert({
-        user_id: authData.user.id,
-        date: new Date().toISOString().split('T')[0],
-        steps: 0,
-        water_glasses: 0,
-        sleep_hours: 0,
-      });
+        // Create initial daily stats
+        const today = new Date().toISOString().split('T')[0];
+        const { error: statsError } = await supabase.from('daily_stats').insert({
+          user_id: authData.user.id,
+          date: today,
+          steps: 0,
+          water_glasses: 0,
+          sleep_hours: 0,
+        });
 
-      if (statsError) {
-        console.warn('Stats creation warning:', statsError);
-      }
+        if (statsError) {
+          console.warn('Stats creation warning:', statsError);
+        }
 
-      // Force login after signup to ensure session is active
-      const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({
-        email: signupData.email,
-        password: signupData.password,
-      });
-
-      if (loginError) {
-        throw new Error('Conta criada, mas erro ao fazer login automático. Tente fazer login manualmente.');
-      }
-
-      if (loginData.user) {
         setSuccess('Conta criada com sucesso! Redirecionando...');
         
-        // Redirect to dashboard
         setTimeout(() => {
           router.push('/dashboard');
-          router.refresh();
-        }, 500);
+        }, 1000);
+      } else {
+        // Email confirmation is required - need to login manually
+        setSuccess('Conta criada! Fazendo login...');
+        
+        // Try to login
+        const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({
+          email: signupData.email,
+          password: signupData.password,
+        });
+
+        if (loginError) {
+          throw new Error('Conta criada, mas erro ao fazer login. Tente fazer login manualmente.');
+        }
+
+        if (loginData.user) {
+          // Create profile after successful login
+          const { error: profileError } = await supabase.from('profiles').insert({
+            user_id: loginData.user.id,
+            name: signupData.name,
+            weight_current: parseFloat(signupData.weightCurrent),
+            weight_goal: parseFloat(signupData.weightGoal),
+            weight_initial: parseFloat(signupData.weightCurrent),
+          });
+
+          if (profileError) {
+            console.warn('Profile creation warning:', profileError);
+          }
+
+          // Create initial daily stats
+          const today = new Date().toISOString().split('T')[0];
+          const { error: statsError } = await supabase.from('daily_stats').insert({
+            user_id: loginData.user.id,
+            date: today,
+            steps: 0,
+            water_glasses: 0,
+            sleep_hours: 0,
+          });
+
+          if (statsError) {
+            console.warn('Stats creation warning:', statsError);
+          }
+
+          setSuccess('Conta criada com sucesso! Redirecionando...');
+          
+          setTimeout(() => {
+            router.push('/dashboard');
+          }, 1000);
+        }
       }
 
     } catch (err: any) {
-      setError(err.message || 'Erro ao criar conta. Tente novamente.');
+      console.error('Signup error:', err);
+      const translatedError = translateError(err.message || 'Erro desconhecido');
+      setError(translatedError);
     } finally {
       setLoading(false);
       setTimeout(() => {
@@ -167,6 +280,23 @@ export default function LoginPage() {
             Continue sua jornada de saúde e bem-estar
           </p>
         </div>
+
+        {/* Connection Error Alert */}
+        {connectionError && (
+          <div className="mb-6 p-4 bg-orange-50 border-2 border-orange-200 rounded-2xl">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-orange-900 mb-1">
+                  Configuração Necessária
+                </p>
+                <p className="text-sm text-orange-700">
+                  {connectionError}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Card */}
         <div className="bg-white rounded-3xl shadow-xl border border-gray-100 p-8">
@@ -261,7 +391,7 @@ export default function LoginPage() {
 
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !isSupabaseConfigured()}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white py-4 rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-6"
               >
                 {loading ? 'Entrando...' : 'Entrar'}
@@ -367,7 +497,7 @@ export default function LoginPage() {
 
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !isSupabaseConfigured()}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 text-white py-4 rounded-xl font-bold hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-6"
               >
                 {loading ? 'Criando conta...' : 'Criar Conta'}
